@@ -1,4 +1,7 @@
-"""标签管理接口：维护标签定义，覆盖提交逻辑评审、发布标签、下线标签等动作。"""
+"""标签管理接口：维护标签定义与版本，覆盖规则编辑、评审、发布、下线与换版追溯。
+
+业务判断全部在 TagmgrService 内完成，路由层只负责把拒绝原因透传给前端。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -12,7 +15,8 @@ router = APIRouter(prefix="/api/tagmgr", tags=["标签管理"])
 
 service = TagmgrService()
 
-LIST_FIELDS = ["标签编号", "标签名称", "标签分类", "计算逻辑", "值类型", "刷新周期", "覆盖对象数", "最近计算时间"]
+LIST_FIELDS = ["标签编号", "标签名称", "标签分类", "计算逻辑", "值类型", "刷新周期",
+               "规则集合", "当前版本", "覆盖对象数", "最近计算时间", "status"]
 STATUSES = ["草稿", "逻辑评审中", "已发布", "已下线"]
 
 
@@ -41,11 +45,20 @@ def get_entry(entry_id: int) -> dict:
 
 @router.post("", response_model=ActionResult)
 def create_entry(payload: EntryPayload) -> ActionResult:
-    """登记一条标签定义，缺字段时说明原因而不是静默丢弃。"""
-    entry, missing = service.create_entry(payload.values)
-    if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
+    """登记一条标签定义，缺字段或编号重复时说明原因而不是静默丢弃。"""
+    entry, errors = service.create_entry(payload.values)
+    if errors:
+        return ActionResult(ok=False, message="；".join(errors))
     return ActionResult(ok=True, message="标签定义已登记", entry=entry)
+
+
+@router.put("/{entry_id}", response_model=ActionResult)
+def update_entry(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """修改标签定义与规则集合；已发布标签被修改会退回草稿，作为待发布的新版本。"""
+    entry, message = service.update_entry(entry_id, payload.values)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
@@ -56,6 +69,15 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
+
+
+@router.get("/{entry_id}/trace")
+def trace_entry(entry_id: int) -> dict[str, Any]:
+    """追溯视图：标签定义 -> 版本快照 -> 引用分群的最终规模 -> 审计台账。"""
+    result = service.trace(entry_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"标签定义 {entry_id} 不存在或已归档")
+    return result
 
 
 @router.get("/export")
